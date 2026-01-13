@@ -78,9 +78,9 @@ def run_whatsapp_client():
             connection_status["pairing_code"] = code
             connection_status["message"] = f"Enter code on phone: {code}"
             
-            print("\n" + "="*30, flush=True)
-            print(f"🔑 PAIRING CODE: {code}", flush=True)
-            print("="*30 + "\n", flush=True)
+            logging.info("\n" + "="*30)
+            logging.info(f"🔑 PAIRING CODE: {code}")
+            logging.info("="*30 + "\n")
             
     except Exception as e:
         logging.error(f"❌ WhatsApp Loop Error: {e}")
