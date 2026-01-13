@@ -17,7 +17,7 @@ app = FastAPI(
 )
 
 # Initialize the WhatsApp client
-client = NewClient("my_bot_session.db")
+client = NewClient("/tmp/my_bot_session.db")
 
 # Global state
 connection_status = {
