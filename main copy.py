@@ -1,12 +1,11 @@
 import logging
-import os
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 import uvicorn
 from neonize.client import NewClient
-from neonize.events import ConnectedEv, MessageEv, PairStatusEv, event
+from neonize.events import ConnectedEv, MessageEv, event
 from neonize.utils import build_jid
 import threading
 
@@ -23,8 +22,7 @@ client = NewClient("/tmp/my_bot_session.db")
 # Global state
 connection_status = {
     "connected": False,
-    "message": "Not connected yet",
-    "pairing_code": None
+    "message": "Not connected yet"
 }
 
 # Pydantic models for request/response
@@ -40,7 +38,6 @@ class SendMessageResponse(BaseModel):
 class ConnectionStatus(BaseModel):
     connected: bool
     message: str
-    pairing_code: Optional[str] = None
 
 class MessageInfo(BaseModel):
     from_number: Optional[str] = None
@@ -53,14 +50,6 @@ def on_connected(client: NewClient, _: ConnectedEv):
     print("✅ Connection Established! You are now online.")
     connection_status["connected"] = True
     connection_status["message"] = "Connected successfully"
-    connection_status["pairing_code"] = None
-
-@client.event(PairStatusEv)
-def on_pair_status(client: NewClient, pair: PairStatusEv):
-    if pair.ID.User:
-        print(f"✅ Logged in as: {pair.ID.User}")
-        connection_status["connected"] = True
-        connection_status["message"] = f"Logged in as: {pair.ID.User}"
 
 @client.event(MessageEv)
 def on_message(client: NewClient, message: MessageEv):
@@ -71,22 +60,6 @@ def on_message(client: NewClient, message: MessageEv):
 # Background task to run the WhatsApp client
 def run_whatsapp_client():
     try:
-        # Get phone number from environment variable or use default
-        phone_number = os.getenv("WHATSAPP_PHONE", "923025114945")
-        
-        # Request pairing code for your phone number (PairPhone with capital letters)
-        pairing_code = client.PairPhone(
-            phone_number,
-            show_push_notification=True
-        )
-        
-        connection_status["pairing_code"] = pairing_code
-        connection_status["message"] = f"Use pairing code: {pairing_code}"
-        
-        print(f"🔑 Your pairing code: {pairing_code}")
-        print("Enter this code in WhatsApp → Linked Devices → Link with phone number")
-        
-        # Connect after pairing
         client.connect()
     except Exception as e:
         print(f"Error connecting WhatsApp client: {e}")
@@ -210,10 +183,7 @@ async def disconnect():
 if __name__ == "__main__":
     print("🚀 Starting WhatsApp Bot API...")
     print("📱 If not authenticated, scan the QR code in the terminal")
-    print("📡 Using pairing code authentication")
-    print("🔐 Pairing code will be displayed in terminal and available via /status endpoint")
     print("📡 API will be available at http://localhost:8000")
     print("📚 API docs available at http://localhost:8000/docs")
-    print(f"📞 Phone number: {os.getenv('WHATSAPP_PHONE', '923171585452')}")
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
