@@ -1,56 +1,48 @@
-import logging
 import os
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+import time
+import threading
+import logging
+import uvicorn
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
-import uvicorn
+
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, MessageEv, PairStatusEv, event
 from neonize.utils import build_jid
-import threading
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="WhatsApp Bot API",
-    description="FastAPI wrapper for Neonize WhatsApp Bot",
-    version="1.0.0"
-)
+# 1. SETUP LOGGING & ENVIRONMENT
+# Force logs to appear immediately in Leapcell
+logging.basicConfig(level=logging.INFO)
+os.environ["PYTHONUNBUFFERED"] = "1"
 
-# Initialize the WhatsApp client
-client = NewClient("/tmp/my_bot_session.db")
+app = FastAPI(title="WhatsApp Bot API")
 
-# Global state
+# 2. GLOBAL STATE
 connection_status = {
     "connected": False,
-    "message": "Not connected yet",
+    "message": "Initializing...",
     "pairing_code": None
 }
 
-# Pydantic models for request/response
-class SendMessageRequest(BaseModel):
-    phone_number: str = Field(..., description="Phone number with country code (e.g., 923171585452)")
-    message: str = Field(..., description="Message to send")
+# 3. DATABASE PATH (Must be /tmp for Leapcell)
+DB_PATH = "/tmp/my_bot_session.db"
+client = NewClient(DB_PATH)
 
-class SendMessageResponse(BaseModel):
-    status: str
-    message: str
+# 4. MODELS
+class SendMessageRequest(BaseModel):
     phone_number: str
+    message: str
 
 class ConnectionStatus(BaseModel):
     connected: bool
     message: str
     pairing_code: Optional[str] = None
 
-class MessageInfo(BaseModel):
-    from_number: Optional[str] = None
-    message_text: Optional[str] = None
-    timestamp: Optional[str] = None
-
-# Event handlers
+# 5. EVENT HANDLERS
 @client.event(ConnectedEv)
 def on_connected(client: NewClient, _: ConnectedEv):
-    print("✅ Connection Established! You are now online.")
+    logging.info("✅ Connection Established!")
     connection_status["connected"] = True
     connection_status["message"] = "Connected successfully"
     connection_status["pairing_code"] = None
@@ -58,162 +50,74 @@ def on_connected(client: NewClient, _: ConnectedEv):
 @client.event(PairStatusEv)
 def on_pair_status(client: NewClient, pair: PairStatusEv):
     if pair.ID.User:
-        print(f"✅ Logged in as: {pair.ID.User}")
+        logging.info(f"✅ Logged in as: {pair.ID.User}")
         connection_status["connected"] = True
-        connection_status["message"] = f"Logged in as: {pair.ID.User}"
 
 @client.event(MessageEv)
 def on_message(client: NewClient, message: MessageEv):
-    # Basic auto-reply logic
-    if message:
-        print(f"📩 New message from {message}")
+    # Logs incoming messages to Leapcell console
+    if message.message.conversation:
+        logging.info(f"📩 Msg from {message.info.sender}: {message.message.conversation}")
 
-# Background task to run the WhatsApp client
+# 6. BACKGROUND WORKER (The "Logic" Fix)
 def run_whatsapp_client():
     try:
-        # Get phone number from environment variable or use default
-        phone_number = os.getenv("WHATSAPP_PHONE", "923025114945")
-        
-        # Request pairing code for your phone number (PairPhone with capital letters)
-        pairing_code = client.PairPhone(
-            phone_number,
-            show_push_notification=True
-        )
-        
-        connection_status["pairing_code"] = pairing_code
-        connection_status["message"] = f"Use pairing code: {pairing_code}"
-        
-        print(f"🔑 Your pairing code: {pairing_code}")
-        print("Enter this code in WhatsApp → Linked Devices → Link with phone number")
-        
-        # Connect after pairing
+        logging.info("⏳ Step 1: Connecting WebSocket...")
+        # We must connect BEFORE requesting a pairing code
         client.connect()
+        
+        # Give the WebSocket time to handshake (The "Anti-Panic" Sleep)
+        time.sleep(10)
+        
+        if not connection_status["connected"]:
+            phone_number = os.getenv("WHATSAPP_PHONE", "923171585452")
+            logging.info(f"⏳ Step 2: Requesting Pairing Code for {phone_number}")
+            
+            # Requesting the code
+            code = client.PairPhone(phone_number, show_push_notification=True)
+            connection_status["pairing_code"] = code
+            connection_status["message"] = f"Enter code on phone: {code}"
+            
+            print("\n" + "="*30, flush=True)
+            print(f"🔑 PAIRING CODE: {code}", flush=True)
+            print("="*30 + "\n", flush=True)
+            
     except Exception as e:
-        print(f"Error connecting WhatsApp client: {e}")
-        connection_status["connected"] = False
-        connection_status["message"] = f"Connection error: {str(e)}"
+        logging.error(f"❌ WhatsApp Loop Error: {e}")
+        connection_status["message"] = f"Error: {str(e)}"
 
-# API Endpoints
+# 7. API ENDPOINTS
 @app.on_event("startup")
 async def startup_event():
-    """Start the WhatsApp client in a background thread when the API starts"""
+    # Start WhatsApp in a background thread
     thread = threading.Thread(target=run_whatsapp_client, daemon=True)
     thread.start()
-    print("🚀 WhatsApp client started in background")
 
-@app.get("/", tags=["Health"])
+@app.get("/")
 async def root():
-    """Root endpoint - API health check"""
-    return {
-        "status": "running",
-        "service": "WhatsApp Bot API",
-        "version": "1.0.0"
-    }
+    return {"status": "online", "bot_connected": connection_status["connected"]}
 
-@app.get("/kaithhealthcheck", tags=["Health"])
-async def kaith_health_check():
-    """Kaith health check endpoint"""
-    return {
-        "status": "ok",
-        "service": "whatsapp-bot",
-        "connected": connection_status["connected"]
-    }
+# Catching BOTH spellings of the Leapcell healthcheck
+@app.get("/kaithhealthcheck")
+@app.get("/kaithheathcheck")
+async def health_check():
+    return {"status": "ok"}
 
-@app.get("/status", response_model=ConnectionStatus, tags=["Status"])
+@app.get("/status", response_model=ConnectionStatus)
 async def get_status():
-    """Get the current connection status of the WhatsApp bot"""
     return connection_status
 
-@app.post("/send", response_model=SendMessageResponse, tags=["Messages"])
+@app.post("/send")
 async def send_message(request: SendMessageRequest):
-    """
-    
-    - **phone_number**: Phone number with country code (no + or spaces)
-    - **message**: The message text to send
-    """
     if not connection_status["connected"]:
-        raise HTTPException(
-            status_code=503,
-            detail="WhatsApp bot is not connected. Please wait for connection or scan QR code."
-        )
-    
+        raise HTTPException(status_code=503, detail="Bot not connected")
     try:
-        # Build JID and send message
         jid = build_jid(request.phone_number)
         client.send_message(jid, request.message)
-        
-        return SendMessageResponse(
-            status="success",
-            message="Message sent successfully",
-            phone_number=request.phone_number
-        )
+        return {"status": "sent"}
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to send message: {str(e)}"
-        )
-
-@app.post("/send-bulk", tags=["Messages"])
-async def send_bulk_messages(
-    phone_numbers: list[str],
-    message: str
-):
-    """
-    Send the same message to multiple phone numbers
-    
-    - **phone_numbers**: List of phone numbers with country codes
-    - **message**: The message text to send to all numbers
-    """
-    if not connection_status["connected"]:
-        raise HTTPException(
-            status_code=503,
-            detail="WhatsApp bot is not connected. Please wait for connection or scan QR code."
-        )
-    
-    results = []
-    for phone in phone_numbers:
-        try:
-            jid = build_jid(phone)
-            client.send_message(jid, message)
-            results.append({
-                "phone_number": phone,
-                "status": "success",
-                "message": "Message sent"
-            })
-        except Exception as e:
-            results.append({
-                "phone_number": phone,
-                "status": "error",
-                "message": str(e)
-            })
-    
-    return {
-        "total": len(phone_numbers),
-        "results": results
-    }
-
-@app.post("/disconnect", tags=["Connection"])
-async def disconnect():
-    """Disconnect the WhatsApp bot"""
-    try:
-        # Note: You may need to implement a proper disconnect method
-        # depending on the Neonize client capabilities
-        connection_status["connected"] = False
-        connection_status["message"] = "Disconnected by user"
-        return {"status": "success", "message": "Disconnected successfully"}
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to disconnect: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    print("🚀 Starting WhatsApp Bot API...")
-    print("📱 If not authenticated, scan the QR code in the terminal")
-    print("📡 Using pairing code authentication")
-    print("🔐 Pairing code will be displayed in terminal and available via /status endpoint")
-    print("📡 API will be available at http://localhost:8000")
-    print("📚 API docs available at http://localhost:8000/docs")
-    print(f"📞 Phone number: {os.getenv('WHATSAPP_PHONE', '923171585452')}")
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Leapcell usually uses uvicorn directly, but this is here for local testing
+    uvicorn.run(app, host="0.0.0.0", port=8080)
