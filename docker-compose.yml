@@ -1,0 +1,11 @@
+services:
+  whatsapp-bot:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - WHATSAPP_PHONE=923171585452
+      - USE_QR=1
+    volumes:
+      - ./session:/app/session
+    restart: unless-stopped
